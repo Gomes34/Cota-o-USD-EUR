@@ -1,69 +1,3 @@
-
-# app.py
-# Windows (desktop) - Python + PySide6
-# App com interface para escolher horário/moedas e rodar em segundo plano no System Tray.
-# No horário agendado, abre uma janela flutuante (topmost) com as cotações (base BRL).
-#
-# Instale:
-#   pip install PySide6 requests
-#
-# Execute:
-#   python app.py
-
-import sys
-import json
-import threading
-from datetime import datetime, timedelta
-
-from pathlib import Path
-
-import requests
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QObject
-from PySide6.QtGui import QFont, QAction, QIcon
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QLineEdit, QMessageBox, QFrame,
-    QSystemTrayIcon, QMenu, QStyle
-)
-
-CONFIG_FILE = "config.json"
-AVAILABLE_COINS = ["USD", "EUR", "GBP", "ARS", "JPY", "CAD", "AUD", "BTC"]
-
-
-def load_config():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if "time" not in cfg:
-            cfg["time"] = "09:00"
-        if "coins" not in cfg or not isinstance(cfg["coins"], list):
-            cfg["coins"] = ["USD", "EUR"]
-        return cfg
-    except Exception:
-        return {"time": "09:00", "coins": ["USD", "EUR"]}
-
-
-def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-
-def fetch_quotes(coins):
-    pairs = ",".join([f"{c}-BRL" for c in coins])
-    url = f"https://economia.awesomeapi.com.br/json/last/{pairs}"
-    data = requests.get(url, timeout=10).json()
-
-    rows = []
-    for c in coins:
-        key = f"{c}BRL"
-        q = data.get(key)
-        if not q:
-            continue
-        bid = float(q.get("bid"))
-        rows.append((c, bid))
-    return rows
-
-
 import sys
 import json
 import threading
@@ -74,132 +8,250 @@ from typing import List, Tuple, Optional
 
 import requests
 from PySide6.QtCore import (
-    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QObject, QStandardPaths
+    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QObject,
+    QStandardPaths, QPoint, QSize, QRect, QSequentialAnimationGroup,
+    QParallelAnimationGroup, Property
 )
 from PySide6.QtGui import (
-    QFont, QAction, QIcon, QCursor
+    QFont, QAction, QIcon, QCursor, QColor, QPainter, QPainterPath,
+    QLinearGradient, QBrush, QPen, QPixmap
 )
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QCheckBox, QLineEdit, QMessageBox, QFrame,
-    QSystemTrayIcon, QMenu, QStyle, QGridLayout, QGraphicsDropShadowEffect, QSizePolicy
+    QSystemTrayIcon, QMenu, QStyle, QGridLayout, QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect, QSpacerItem, QSizePolicy, QScrollArea
 )
 
-AVAILABLE_COINS = ["USD", "EUR", "GBP", "ARS", "JPY", "CAD", "AUD", "BTC"]
+AVAILABLE_COINS = [
+    ("USD", "Dólar Americano", "🇺🇸"),
+    ("EUR", "Euro", "🇪🇺"),
+    ("GBP", "Libra Esterlina", "🇬🇧"),
+    ("ARS", "Peso Argentino", "🇦🇷"),
+    ("JPY", "Iene Japonês", "🇯🇵"),
+    ("CAD", "Dólar Canadense", "🇨🇦"),
+    ("AUD", "Dólar Australiano", "🇦🇺"),
+    ("BTC", "Bitcoin", "₿"),
+]
+
+COIN_CODES = [c[0] for c in AVAILABLE_COINS]
 APP_NAME = "CotacaoBRLTray"
 
-# ------------------ Visual (QSS) ------------------
-QSS = """
-/* Base */
-QWidget {
-    background: #0f1115;
-    color: #e8eaf0;
-    font-family: "Segoe UI";
-    font-size: 11pt;
-}
+# ──────────────────── Cores do tema ────────────────────
+ACCENT = "#7c8aff"
+ACCENT_LIGHT = "#a0b4ff"
+ACCENT_GLOW = "rgba(124,138,255,0.35)"
+BG_DARK = "#0c0e14"
+BG_CARD = "rgba(255,255,255,0.035)"
+BG_CARD_HOVER = "rgba(255,255,255,0.055)"
+BORDER = "rgba(255,255,255,0.07)"
+BORDER_FOCUS = "rgba(124,138,255,0.6)"
+TEXT_PRIMARY = "#eef0f6"
+TEXT_SECONDARY = "rgba(238,240,246,0.55)"
+TEXT_DIM = "rgba(238,240,246,0.35)"
+SUCCESS = "#5ae4a7"
+DANGER = "#ff7b7b"
+WARNING = "#ffc857"
 
-/* Labels */
-QLabel#Title {
-    font-size: 15pt;
+# ──────────────────── QSS Global ────────────────────
+QSS = f"""
+/* ─── Base ─── */
+QWidget {{
+    background: {BG_DARK};
+    color: {TEXT_PRIMARY};
+    font-family: "Segoe UI", "Inter", "SF Pro Display", sans-serif;
+    font-size: 10.5pt;
+}}
+
+QScrollArea {{
+    border: none;
+    background: transparent;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 6px;
+    margin: 4px 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: rgba(255,255,255,0.12);
+    border-radius: 3px;
+    min-height: 30px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: rgba(255,255,255,0.22);
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
+
+/* ─── Labels ─── */
+QLabel#Title {{
+    font-size: 17pt;
+    font-weight: 800;
+    color: {TEXT_PRIMARY};
+    letter-spacing: -0.3px;
+}}
+QLabel#Subtitle {{
+    color: {TEXT_SECONDARY};
+    font-size: 9.5pt;
+    line-height: 1.5;
+}}
+QLabel#Section {{
+    font-size: 9pt;
     font-weight: 700;
-    color: #f2f4f8;
-}
-QLabel#Subtitle {
-    color: rgba(232,234,240,170);
-    font-size: 10.5pt;
-}
-QLabel#Section {
-    font-size: 10.5pt;
+    color: {TEXT_SECONDARY};
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    margin-top: 4px;
+}}
+QLabel#Status {{
+    padding: 12px 16px;
+    border-radius: 14px;
+    background: rgba(90,228,167,0.06);
+    border: 1px solid rgba(90,228,167,0.15);
+    color: {SUCCESS};
+    font-size: 9.5pt;
     font-weight: 600;
-    color: rgba(232,234,240,200);
-    margin-top: 8px;
-}
-QLabel#Status {
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.08);
-    color: rgba(232,234,240,210);
-}
+}}
+QLabel#Hint {{
+    color: {TEXT_DIM};
+    font-size: 8.5pt;
+}}
 
-/* Card container */
-QFrame#Card {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.09);
-    border-radius: 16px;
-}
-
-/* Inputs */
-QLineEdit {
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.12);
-    padding: 10px 12px;
-    border-radius: 12px;
-    selection-background-color: rgba(125, 167, 255, 0.35);
-}
-QLineEdit:focus {
-    border: 1px solid rgba(125, 167, 255, 0.65);
-    background: rgba(255,255,255,0.07);
-}
-
-/* Checkboxes */
-QCheckBox {
-    spacing: 10px;
-    padding: 6px 8px;
-    border-radius: 10px;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.06);
-}
-QCheckBox:hover {
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.10);
-}
-QCheckBox::indicator {
-    width: 18px;
-    height: 18px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.20);
-    background: rgba(0,0,0,0.25);
-}
-QCheckBox::indicator:checked {
+/* ─── Cards ─── */
+QFrame#Card {{
+    background: {BG_CARD};
+    border: 1px solid {BORDER};
+    border-radius: 18px;
+}}
+QFrame#HeaderCard {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                                stop:0 #7da7ff, stop:1 #6ee7ff);
-    border: 1px solid rgba(255,255,255,0.35);
-}
+                                stop:0 rgba(124,138,255,0.08),
+                                stop:1 rgba(110,231,255,0.04));
+    border: 1px solid rgba(124,138,255,0.12);
+    border-radius: 20px;
+}}
 
-/* Buttons */
-QPushButton {
-    padding: 10px 14px;
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,0.14);
-    background: rgba(255,255,255,0.06);
-    color: #f2f4f8;
+/* ─── Inputs ─── */
+QLineEdit {{
+    background: rgba(255,255,255,0.045);
+    border: 1.5px solid {BORDER};
+    padding: 12px 16px;
+    border-radius: 14px;
+    font-size: 11pt;
     font-weight: 600;
-}
-QPushButton:hover {
-    background: rgba(255,255,255,0.10);
-    border: 1px solid rgba(255,255,255,0.18);
-}
-QPushButton:pressed {
+    color: {TEXT_PRIMARY};
+    selection-background-color: {ACCENT_GLOW};
+}}
+QLineEdit:focus {{
+    border: 1.5px solid {BORDER_FOCUS};
+    background: rgba(255,255,255,0.06);
+}}
+QLineEdit::placeholder {{
+    color: {TEXT_DIM};
+}}
+
+/* ─── Checkboxes (coin cards) ─── */
+QCheckBox {{
+    spacing: 0px;
+    padding: 0px;
+    border: none;
+    background: transparent;
+}}
+QCheckBox::indicator {{
+    width: 0px;
+    height: 0px;
+}}
+
+/* ─── Buttons ─── */
+QPushButton {{
+    padding: 12px 20px;
+    border-radius: 14px;
+    border: 1.5px solid {BORDER};
+    background: rgba(255,255,255,0.04);
+    color: {TEXT_PRIMARY};
+    font-weight: 700;
+    font-size: 10pt;
+    letter-spacing: 0.2px;
+}}
+QPushButton:hover {{
     background: rgba(255,255,255,0.08);
-}
-QPushButton#Primary {
-    border: 1px solid rgba(125,167,255,0.55);
-    background: rgba(125,167,255,0.18);
-}
-QPushButton#Primary:hover {
-    background: rgba(125,167,255,0.25);
-}
-QPushButton#Danger {
-    border: 1px solid rgba(255,120,120,0.50);
-    background: rgba(255,120,120,0.14);
-}
-QPushButton#Danger:hover {
-    background: rgba(255,120,120,0.20);
-}
+    border: 1.5px solid rgba(255,255,255,0.15);
+}}
+QPushButton:pressed {{
+    background: rgba(255,255,255,0.06);
+}}
+
+QPushButton#Primary {{
+    border: 1.5px solid rgba(124,138,255,0.5);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 rgba(124,138,255,0.2),
+                                stop:1 rgba(110,231,255,0.12));
+    color: {ACCENT_LIGHT};
+}}
+QPushButton#Primary:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 rgba(124,138,255,0.3),
+                                stop:1 rgba(110,231,255,0.18));
+    border: 1.5px solid rgba(124,138,255,0.65);
+}}
+
+QPushButton#Danger {{
+    border: 1.5px solid rgba(255,123,123,0.45);
+    background: rgba(255,123,123,0.1);
+    color: {DANGER};
+}}
+QPushButton#Danger:hover {{
+    background: rgba(255,123,123,0.18);
+}}
+
+QPushButton#Ghost {{
+    border: none;
+    background: transparent;
+    color: {TEXT_SECONDARY};
+    padding: 8px 12px;
+}}
+QPushButton#Ghost:hover {{
+    color: {TEXT_PRIMARY};
+    background: rgba(255,255,255,0.04);
+}}
+
+/* ─── Tooltip ─── */
+QToolTip {{
+    background: #1a1c24;
+    color: {TEXT_PRIMARY};
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 9pt;
+}}
+
+/* ─── Menu (Tray) ─── */
+QMenu {{
+    background: #14161e;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 8px 20px;
+    border-radius: 8px;
+    color: {TEXT_PRIMARY};
+}}
+QMenu::item:selected {{
+    background: rgba(124,138,255,0.15);
+}}
+QMenu::separator {{
+    height: 1px;
+    background: rgba(255,255,255,0.08);
+    margin: 4px 8px;
+}}
 """
 
-# ------------------ Config ------------------
+# ──────────────────── Config ────────────────────
 def config_path() -> Path:
     base = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
     base.mkdir(parents=True, exist_ok=True)
@@ -222,7 +274,7 @@ def load_config() -> AppConfig:
         coins = data.get("coins", ["USD", "EUR"])
         if not isinstance(coins, list):
             coins = ["USD", "EUR"]
-        coins = [c for c in coins if c in AVAILABLE_COINS]
+        coins = [c for c in coins if c in COIN_CODES]
         if not coins:
             coins = ["USD", "EUR"]
         return AppConfig(time=time, coins=coins)
@@ -236,7 +288,7 @@ def save_config(cfg: AppConfig) -> None:
         encoding="utf-8",
     )
 
-# ------------------ Helpers ------------------
+# ──────────────────── Helpers ────────────────────
 def normalize_hhmm(text: str) -> str:
     text = text.strip()
     parts = text.split(":")
@@ -247,6 +299,7 @@ def normalize_hhmm(text: str) -> str:
     if not (0 <= h <= 23 and 0 <= m <= 59):
         raise ValueError("Hora/minuto fora do intervalo")
     return f"{h:02d}:{m:02d}"
+
 def next_trigger_datetime(hhmm: str) -> datetime:
     now = datetime.now()
     hour, minute = map(int, hhmm.split(":"))
@@ -254,83 +307,34 @@ def next_trigger_datetime(hhmm: str) -> datetime:
     if target <= now:
         target += timedelta(days=1)
     return target
+
 def fmt_brl(v: float) -> str:
     s = f"{v:,.4f}"
     s = s.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
 
-class ToastOverlay(QWidget):
-    def __init__(self, title: str, lines: list[str], duration_ms: int = 12000):
-        super().__init__()
+def time_until(dt: datetime) -> str:
+    delta = dt - datetime.now()
+    if delta.total_seconds() <= 0:
+        return "agora"
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes, _ = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}min"
+    return f"{minutes}min"
 
-        self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(8)
-
-        t = QLabel(title)
-        t.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        t.setObjectName("title")
-
-        body = QLabel("\n".join(lines) if lines else "Sem dados.")
-        body.setFont(QFont("Segoe UI", 11))
-        body.setObjectName("body")
-        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        close_btn = QPushButton("Fechar")
-        close_btn.setObjectName("closeBtn")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-
-        card_layout.addWidget(t)
-        card_layout.addWidget(body)
-        card_layout.addLayout(btn_row)
-
-        root.addWidget(card)
-
-        self.setStyleSheet("""
-            QFrame#card {
-                background: rgba(22, 22, 28, 245);
-                border: 2px solid rgba(255,255,255,60);
-                border-radius: 14px;
-            }
-            QLabel#title { color: white; }
-            QLabel#body  { color: rgba(255,255,255,220); }
-            QPushButton#closeBtn {
-                background: rgba(255,255,255,22);
-                color: white;
-                border: 1px solid rgba(255,255,255,35);
-                padding: 6px 12px;
-                border-radius: 10px;
-            }
-            QPushButton#closeBtn:hover { background: rgba(255,255,255,32); }
-        """)
-# ------------------ API Client ------------------
+# ──────────────────── API Client ────────────────────
 class QuotesClient:
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": f"{APP_NAME}/1.0"})
+        self.session.headers.update({"User-Agent": f"{APP_NAME}/2.0"})
 
-    def fetch_quotes(self, coins: List[str]) -> List[Tuple[str, float]]:
+    def fetch_quotes(self, coins: List[str]) -> List[Tuple[str, float, float]]:
         pairs = ",".join([f"{c}-BRL" for c in coins])
         url = f"https://economia.awesomeapi.com.br/json/last/{pairs}"
-
         r = self.session.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-
         rows = []
         for c in coins:
             key = f"{c}BRL"
@@ -338,306 +342,625 @@ class QuotesClient:
             if not q:
                 continue
             bid_raw = q.get("bid")
+            pct_raw = q.get("pctChange", "0")
             if bid_raw is None:
                 continue
-            rows.append((c, float(bid_raw)))
+            rows.append((c, float(bid_raw), float(pct_raw)))
         return rows
 
-# ------------------ Toast Overlay ------------------
-class ToastOverlay(QWidget):
-    def __init__(self, title: str, lines: list[str], duration_ms: int = 12000):
-        super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+# ──────────────────── Coin Card Widget ────────────────────
+class CoinCard(QFrame):
+    """Card selecionável para cada moeda."""
+    toggled = Signal(str, bool)
 
-        # ===== Container externo (para sombra respirar) =====
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 14, 14, 14)  # margem para a sombra aparecer
-        outer.setSpacing(0)
+    def __init__(self, code: str, name: str, flag: str, checked: bool = False):
+        super().__init__()
+        self.code = code
+        self._checked = checked
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(64)
+        self.setMinimumWidth(150)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+
+        # Flag / icon
+        flag_label = QLabel(flag)
+        flag_label.setFont(QFont("Segoe UI Emoji", 18))
+        flag_label.setFixedWidth(32)
+        flag_label.setAlignment(Qt.AlignCenter)
+        flag_label.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(flag_label)
+
+        # Text
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(1)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+
+        code_label = QLabel(code)
+        code_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        code_label.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+
+        name_label = QLabel(name)
+        name_label.setFont(QFont("Segoe UI", 8))
+        name_label.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; border: none;")
+
+        text_layout.addWidget(code_label)
+        text_layout.addWidget(name_label)
+        layout.addLayout(text_layout)
+        layout.addStretch()
+
+        # Check indicator
+        self.indicator = QLabel("✓")
+        self.indicator.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        self.indicator.setFixedSize(28, 28)
+        self.indicator.setAlignment(Qt.AlignCenter)
+        self.indicator.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(self.indicator)
+
+        self._update_style()
+
+    def _update_style(self):
+        if self._checked:
+            self.setStyleSheet(f"""
+                CoinCard {{
+                    background: rgba(124,138,255,0.1);
+                    border: 1.5px solid rgba(124,138,255,0.4);
+                    border-radius: 14px;
+                }}
+                CoinCard:hover {{
+                    background: rgba(124,138,255,0.14);
+                }}
+            """)
+            self.indicator.setStyleSheet(f"""
+                background: {ACCENT};
+                border: none;
+                border-radius: 14px;
+                color: #0c0e14;
+                font-weight: 800;
+            """)
+        else:
+            self.setStyleSheet(f"""
+                CoinCard {{
+                    background: {BG_CARD};
+                    border: 1.5px solid {BORDER};
+                    border-radius: 14px;
+                }}
+                CoinCard:hover {{
+                    background: {BG_CARD_HOVER};
+                    border: 1.5px solid rgba(255,255,255,0.12);
+                }}
+            """)
+            self.indicator.setStyleSheet(f"""
+                background: rgba(255,255,255,0.05);
+                border: 1.5px solid rgba(255,255,255,0.12);
+                border-radius: 14px;
+                color: transparent;
+            """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._checked = not self._checked
+            self._update_style()
+            self.toggled.emit(self.code, self._checked)
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, val: bool):
+        self._checked = val
+        self._update_style()
+
+# ──────────────────── Toast / Notification Overlay ────────────────────
+class ToastOverlay(QWidget):
+    def __init__(self, title: str, lines: List[Tuple[str, str, str, str]],
+                 timestamp: str = "", duration_ms: int = 15000):
+        """
+        lines: lista de tuplas (flag, code, value, pct_change)
+        Se vazio, exibe mensagem de erro/info.
+        """
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(440)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
 
         card = QFrame()
         card.setObjectName("ToastCard")
-        card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
-        card.setMinimumWidth(320)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
 
-        # Sombra suave
+        # ─── Header do toast ───
+        toast_header = QFrame()
+        toast_header.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(124,138,255,0.12),
+                    stop:1 rgba(110,231,255,0.06));
+                border: none;
+                border-top-left-radius: 18px;
+                border-top-right-radius: 18px;
+                padding: 0px;
+            }}
+        """)
+        header_layout = QHBoxLayout(toast_header)
+        header_layout.setContentsMargins(20, 16, 20, 12)
+
+        # Ícone de sino/notificação
+        bell_icon = QLabel("📊")
+        bell_icon.setFont(QFont("Segoe UI Emoji", 16))
+        bell_icon.setStyleSheet("background: transparent; border: none;")
+        header_layout.addWidget(bell_icon)
+
+        header_text = QVBoxLayout()
+        header_text.setSpacing(2)
+
+        t = QLabel(title)
+        t.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        t.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+
+        ts_label = QLabel(timestamp if timestamp else datetime.now().strftime("%d/%m/%Y • %H:%M"))
+        ts_label.setFont(QFont("Segoe UI", 8))
+        ts_label.setStyleSheet(f"color: {TEXT_DIM}; background: transparent; border: none;")
+
+        header_text.addWidget(t)
+        header_text.addWidget(ts_label)
+        header_layout.addLayout(header_text)
+        header_layout.addStretch()
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 16px;
+                color: {TEXT_SECONDARY};
+                font-size: 12pt;
+                font-weight: 600;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,123,123,0.15);
+                color: {DANGER};
+                border-color: rgba(255,123,123,0.3);
+            }}
+        """)
+        close_btn.clicked.connect(self.fade_out)
+        header_layout.addWidget(close_btn)
+
+        card_layout.addWidget(toast_header)
+
+        # ─── Body do toast ───
+        body_frame = QFrame()
+        body_frame.setStyleSheet("""
+            QFrame {
+                background: transparent;
+                border: none;
+            }
+        """)
+        body_layout = QVBoxLayout(body_frame)
+        body_layout.setContentsMargins(20, 16, 20, 16)
+        body_layout.setSpacing(8)
+
+        if isinstance(lines, list) and lines and isinstance(lines[0], tuple):
+            for flag, code, value, pct in lines:
+                row = self._create_quote_row(flag, code, value, pct)
+                body_layout.addWidget(row)
+        elif isinstance(lines, list):
+            for line in lines:
+                lbl = QLabel(str(line))
+                lbl.setFont(QFont("Segoe UI", 10))
+                lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; background: transparent; border: none;")
+                lbl.setWordWrap(True)
+                body_layout.addWidget(lbl)
+        else:
+            lbl = QLabel("Sem dados disponíveis.")
+            lbl.setStyleSheet(f"color: {TEXT_DIM}; background: transparent; border: none;")
+            body_layout.addWidget(lbl)
+
+        card_layout.addWidget(body_frame)
+
+        # ─── Footer do toast ───
+        footer = QFrame()
+        footer.setFixedHeight(6)
+        footer.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {ACCENT}, stop:0.5 #6ee7ff, stop:1 {SUCCESS});
+                border: none;
+                border-bottom-left-radius: 18px;
+                border-bottom-right-radius: 18px;
+            }}
+        """)
+        card_layout.addWidget(footer)
+
+        root.addWidget(card)
+
+        # Sombra
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(34)
-        shadow.setOffset(0, 12)
-        shadow.setColor(Qt.black)
+        shadow.setBlurRadius(50)
+        shadow.setOffset(0, 15)
+        shadow.setColor(QColor(0, 0, 0, 160))
         card.setGraphicsEffect(shadow)
 
-        outer.addWidget(card)
-
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
-
-        # ===== Header =====
-        header_row = QHBoxLayout()
-        header_row.setSpacing(10)
-
-        title_lbl = QLabel(title)
-        title_lbl.setObjectName("ToastTitle")
-        title_lbl.setFont(QFont("Segoe UI", 11, QFont.Bold))
-
-        # Botão X pequeno no topo (opcional, além do "Fechar")
-        x_btn = QPushButton("×")
-        x_btn.setObjectName("ToastX")
-        x_btn.setFixedSize(28, 28)
-        x_btn.clicked.connect(self.close)
-
-        header_row.addWidget(title_lbl, 1)
-        header_row.addWidget(x_btn, 0, Qt.AlignRight)
-        layout.addLayout(header_row)
-
-        # ===== Conteúdo =====
-        content = QFrame()
-        content.setObjectName("ToastContent")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
-
-        # Interpreta lines no formato "USD/BRL: R$ x" e alinha bonito
-        # Se não bater o padrão, mostra como texto simples.
-        parsed_any = False
-        for s in (lines or []):
-            if "/BRL:" in s:
-                parsed_any = True
-                left, right = s.split(":", 1)
-                pair = left.strip()           # ex "USD/BRL"
-                value = right.strip()         # ex "R$ 5,1707"
-
-                row = QHBoxLayout()
-                row.setSpacing(10)
-
-                # Badge do par
-                badge = QLabel(pair)
-                badge.setObjectName("ToastBadge")
-
-                val = QLabel(value)
-                val.setObjectName("ToastValue")
-                val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-                row.addWidget(badge, 0)
-                row.addWidget(val, 1)
-                content_layout.addLayout(row)
-            else:
-                # fallback (linha simples)
-                lbl = QLabel(s)
-                lbl.setObjectName("ToastLine")
-                lbl.setWordWrap(True)
-                content_layout.addWidget(lbl)
-
-        if not lines:
-            lbl = QLabel("Sem dados.")
-            lbl.setObjectName("ToastLine")
-            content_layout.addWidget(lbl)
-
-        layout.addWidget(content)
-
-        # ===== Rodapé =====
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-
-        close_btn = QPushButton("Fechar")
-        close_btn.setObjectName("ToastClose")
-        close_btn.setFixedHeight(34)
-        close_btn.clicked.connect(self.close)
-        footer.addWidget(close_btn)
-
-        layout.addLayout(footer)
-
-        # ===== Estilo do toast (só dele) =====
-        self.setStyleSheet("""
+        card.setStyleSheet("""
             QFrame#ToastCard {
-                background: rgba(18, 20, 26, 245);
-                border: 1px solid rgba(255,255,255,0.10);
+                background: #12141c;
+                border: 1px solid rgba(255,255,255,0.09);
                 border-radius: 18px;
-            }
-
-            QLabel#ToastTitle {
-                color: rgba(255,255,255,235);
-                letter-spacing: 0.2px;
-            }
-
-            QPushButton#ToastX {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-                border-radius: 10px;
-                color: rgba(255,255,255,200);
-                font-size: 14pt;
-                padding-bottom: 2px;
-            }
-            QPushButton#ToastX:hover {
-                background: rgba(255,255,255,0.10);
-                border: 1px solid rgba(255,255,255,0.14);
-            }
-
-            QFrame#ToastContent {
-                background: rgba(255,255,255,0.03);
-                border: 1px solid rgba(255,255,255,0.06);
-                border-radius: 14px;
-                padding: 10px;
-            }
-
-            QLabel#ToastBadge {
-                background: rgba(125,167,255,0.16);
-                border: 1px solid rgba(125,167,255,0.28);
-                color: rgba(230,240,255,235);
-                padding: 6px 10px;
-                border-radius: 999px;
-                font-weight: 700;
-                font-size: 10pt;
-            }
-
-            QLabel#ToastValue {
-                color: rgba(255,255,255,220);
-                font-weight: 600;
-                font-size: 10.5pt;
-            }
-
-            QLabel#ToastLine {
-                color: rgba(255,255,255,210);
-            }
-
-            QPushButton#ToastClose {
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 12px;
-                padding: 6px 14px;
-                color: rgba(255,255,255,230);
-                font-weight: 600;
-            }
-            QPushButton#ToastClose:hover {
-                background: rgba(255,255,255,0.10);
-                border: 1px solid rgba(255,255,255,0.16);
             }
         """)
 
-        # ===== Animações =====
+        # Animações
         QTimer.singleShot(duration_ms, self.fade_out)
 
         self.setWindowOpacity(0.0)
         self.anim_in = QPropertyAnimation(self, b"windowOpacity")
-        self.anim_in.setDuration(220)
+        self.anim_in.setDuration(280)
         self.anim_in.setStartValue(0.0)
         self.anim_in.setEndValue(1.0)
         self.anim_in.setEasingCurve(QEasingCurve.OutCubic)
 
         self.anim_out = QPropertyAnimation(self, b"windowOpacity")
-        self.anim_out.setDuration(220)
+        self.anim_out.setDuration(250)
         self.anim_out.setStartValue(1.0)
         self.anim_out.setEndValue(0.0)
         self.anim_out.setEasingCurve(QEasingCurve.InCubic)
         self.anim_out.finished.connect(self.close)
 
+        self._fading_out = False
+
+    def _create_quote_row(self, flag: str, code: str, value: str, pct: str) -> QFrame:
+        row = QFrame()
+        row.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255,255,255,0.03);
+                border: 1px solid rgba(255,255,255,0.05);
+                border-radius: 12px;
+            }}
+        """)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 10, 14, 10)
+        row_layout.setSpacing(12)
+
+        # Flag
+        flag_lbl = QLabel(flag)
+        flag_lbl.setFont(QFont("Segoe UI Emoji", 14))
+        flag_lbl.setFixedWidth(28)
+        flag_lbl.setStyleSheet("background: transparent; border: none;")
+        row_layout.addWidget(flag_lbl)
+
+        # Code
+        code_lbl = QLabel(code)
+        code_lbl.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        code_lbl.setFixedWidth(38)
+        code_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+        row_layout.addWidget(code_lbl)
+
+        row_layout.addStretch()
+
+        # Value
+        val_lbl = QLabel(value)
+        val_lbl.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        val_lbl.setStyleSheet(f"color: {TEXT_PRIMARY}; background: transparent; border: none;")
+        row_layout.addWidget(val_lbl)
+
+        # Percentage
+        try:
+            pct_val = float(pct.replace("%", "").replace(",", ".").strip()) if pct else 0
+        except ValueError:
+            pct_val = 0
+
+        if pct_val > 0:
+            pct_color = SUCCESS
+            arrow = "▲"
+        elif pct_val < 0:
+            pct_color = DANGER
+            arrow = "▼"
+        else:
+            pct_color = TEXT_DIM
+            arrow = "─"
+
+        pct_lbl = QLabel(f"{arrow} {pct}")
+        pct_lbl.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        pct_lbl.setStyleSheet(f"""
+            color: {pct_color};
+            background: rgba({pct_color.strip('#')
+            if pct_color.startswith('#') else '255,255,255'}, 0.08);
+            border: none;
+            border-radius: 8px;
+            padding: 3px 8px;
+        """)
+        # Fix the rgba for non-hex colors
+        if pct_val > 0:
+            pct_lbl.setStyleSheet(f"""
+                color: {SUCCESS};
+                background: rgba(90,228,167,0.1);
+                border: none;
+                border-radius: 8px;
+                padding: 3px 8px;
+            """)
+        elif pct_val < 0:
+            pct_lbl.setStyleSheet(f"""
+                color: {DANGER};
+                background: rgba(255,123,123,0.1);
+                border: none;
+                border-radius: 8px;
+                padding: 3px 8px;
+            """)
+        else:
+            pct_lbl.setStyleSheet(f"""
+                color: {TEXT_DIM};
+                background: rgba(255,255,255,0.04);
+                border: none;
+                border-radius: 8px;
+                padding: 3px 8px;
+            """)
+
+        row_layout.addWidget(pct_lbl)
+
+        return row
+
     def showEvent(self, event):
         super().showEvent(event)
         self.adjustSize()
-
-        screen = QApplication.primaryScreen().availableGeometry()
-        x = screen.x() + screen.width() - self.width() - 16
-        y = screen.y() + 16
-        # posiciona no monitor do mouse (sem usar QGuiApplication.cursor())
         pos = QCursor.pos()
         screen = QApplication.screenAt(pos)
         if screen is None:
             screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
-
-        x = geo.x() + geo.width() - self.width() - 18
-        y = geo.y() + 18
+        x = geo.x() + geo.width() - self.width() - 20
+        y = geo.y() + 20
         self.move(x, y)
-
         self.raise_()
         self.activateWindow()
         self.anim_in.start()
 
     def fade_out(self):
-        if self.isVisible():
+        if self.isVisible() and not self._fading_out:
+            self._fading_out = True
             self.anim_out.start()
-class Bridge(QObject):
-    toast = Signal(str, list)
 
 class Bridge(QObject):
     toast = Signal(str, list)
 
-# ------------------ Main Window ------------------
+# ──────────────────── Separator ────────────────────
+class Separator(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(1)
+        self.setStyleSheet(f"background: {BORDER}; border: none;")
+
+# ──────────────────── Main Window ────────────────────
 class Main(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cotação em BRL - Agendador (Tray)")
-        self.resize(520, 580)
-        self.resize(560, 620)
-
+        self.setWindowTitle("Cotações BRL")
+        self.resize(520, 680)
+        self.setMinimumSize(420, 560)
         self.bridge = Bridge()
         self.bridge.toast.connect(self.show_overlay)
-
+        self.client = QuotesClient()
         cfg = load_config()
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        # Layout raiz com scroll
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        title = QLabel("Agendar janela flutuante com cotações (base BRL)")
-        title.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        layout.addWidget(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        layout.addWidget(QLabel("Horário diário (HH:MM):"))
-        self.time_edit = QLineEdit(cfg["time"])
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        # ─── Header ───
+        header = QFrame()
+        header.setObjectName("HeaderCard")
+        hl = QVBoxLayout(header)
+        hl.setContentsMargins(24, 22, 24, 22)
+        hl.setSpacing(8)
+
+        # Header top row
+        h_top = QHBoxLayout()
+        h_top.setSpacing(14)
+
+        icon_label = QLabel("💱")
+        icon_label.setFont(QFont("Segoe UI Emoji", 28))
+        icon_label.setStyleSheet("background: transparent; border: none;")
+        h_top.addWidget(icon_label)
+
+        h_text = QVBoxLayout()
+        h_text.setSpacing(4)
+        title = QLabel("Cotações BRL")
+        title.setObjectName("Title")
+        subtitle = QLabel("Acompanhe câmbios automaticamente.\nNotificações no horário programado.")
+        subtitle.setObjectName("Subtitle")
+        h_text.addWidget(title)
+        h_text.addWidget(subtitle)
+        h_top.addLayout(h_text)
+        h_top.addStretch()
+
+        hl.addLayout(h_top)
+        layout.addWidget(header)
+
+        # ─── Time section ───
+        time_card = QFrame()
+        time_card.setObjectName("Card")
+        time_layout = QVBoxLayout(time_card)
+        time_layout.setContentsMargins(20, 18, 20, 18)
+        time_layout.setSpacing(12)
+
+        time_header = QHBoxLayout()
+        clock_icon = QLabel("⏰")
+        clock_icon.setFont(QFont("Segoe UI Emoji", 13))
+        clock_icon.setStyleSheet("background: transparent; border: none;")
+        time_header.addWidget(clock_icon)
+
+        lab_time = QLabel("HORÁRIO DIÁRIO")
+        lab_time.setObjectName("Section")
+        time_header.addWidget(lab_time)
+        time_header.addStretch()
+        time_layout.addLayout(time_header)
+
+        time_input_row = QHBoxLayout()
+        time_input_row.setSpacing(10)
+        self.time_edit = QLineEdit(cfg.time)
         self.time_edit.setPlaceholderText("Ex: 09:30")
-        layout.addWidget(self.time_edit)
+        self.time_edit.setMaximumWidth(160)
+        self.time_edit.setAlignment(Qt.AlignCenter)
+        time_input_row.addWidget(self.time_edit)
 
-        layout.addWidget(QLabel("Moedas:"))
-        self.checks = {}
-        for c in AVAILABLE_COINS:
-            cb = QCheckBox(c)
-            cb.setChecked(c in cfg["coins"])
-            self.checks[c] = cb
-            layout.addWidget(cb)
+        time_hint = QLabel("Formato 24h (HH:MM)")
+        time_hint.setObjectName("Hint")
+        time_input_row.addWidget(time_hint)
+        time_input_row.addStretch()
+
+        time_layout.addLayout(time_input_row)
+        layout.addWidget(time_card)
+
+        # ─── Coins section ───
+        coins_card = QFrame()
+        coins_card.setObjectName("Card")
+        coins_layout = QVBoxLayout(coins_card)
+        coins_layout.setContentsMargins(20, 18, 20, 18)
+        coins_layout.setSpacing(14)
+
+        coins_header = QHBoxLayout()
+        coins_icon = QLabel("🪙")
+        coins_icon.setFont(QFont("Segoe UI Emoji", 13))
+        coins_icon.setStyleSheet("background: transparent; border: none;")
+        coins_header.addWidget(coins_icon)
+
+        lab_coins = QLabel("MOEDAS")
+        lab_coins.setObjectName("Section")
+        coins_header.addWidget(lab_coins)
+        coins_header.addStretch()
+
+        # Contador de selecionados
+        self.coin_count = QLabel(f"{len(cfg.coins)} selecionadas")
+        self.coin_count.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        self.coin_count.setStyleSheet(f"""
+            color: {ACCENT_LIGHT};
+            background: rgba(124,138,255,0.12);
+            border: none;
+            border-radius: 10px;
+            padding: 4px 10px;
+        """)
+        coins_header.addWidget(self.coin_count)
+
+        coins_layout.addLayout(coins_header)
+
+        # Grid de coin cards
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        self.coin_cards = {}
+        cols = 2
+        for i, (code, name, flag) in enumerate(AVAILABLE_COINS):
+            card_w = CoinCard(code, name, flag, checked=(code in cfg.coins))
+            card_w.toggled.connect(self._on_coin_toggled)
+            self.coin_cards[code] = card_w
+            grid.addWidget(card_w, i // cols, i % cols)
+        coins_layout.addLayout(grid)
+        layout.addWidget(coins_card)
+
+        # ─── Buttons ───
+        btns_card = QFrame()
+        btns_card.setObjectName("Card")
+        btns_layout = QVBoxLayout(btns_card)
+        btns_layout.setContentsMargins(20, 16, 20, 16)
+        btns_layout.setSpacing(10)
 
         btns = QHBoxLayout()
-        self.save_btn = QPushButton("Salvar e Agendar")
-        self.test_btn = QPushButton("Testar Agora")
+        btns.setSpacing(10)
+
+        self.save_btn = QPushButton("💾  Salvar e Agendar")
+        self.save_btn.setObjectName("Primary")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setMinimumHeight(48)
+
+        self.test_btn = QPushButton("🔍  Testar Agora")
+        self.test_btn.setCursor(Qt.PointingHandCursor)
+        self.test_btn.setMinimumHeight(48)
+
         btns.addWidget(self.save_btn)
         btns.addWidget(self.test_btn)
-        layout.addLayout(btns)
+        btns_layout.addLayout(btns)
 
+        layout.addWidget(btns_card)
+
+        # ─── Status ───
         self.status = QLabel("")
+        self.status.setObjectName("Status")
         layout.addWidget(self.status)
 
-        layout.addWidget(QLabel(
-            "Dica: ao fechar (X), o app vai para a bandeja do sistema e continua rodando."
-        ))
+        # ─── Footer hint ───
+        footer_row = QHBoxLayout()
+        footer_row.setContentsMargins(4, 0, 4, 0)
+        hint_icon = QLabel("ℹ️")
+        hint_icon.setFont(QFont("Segoe UI Emoji", 9))
+        hint_icon.setStyleSheet("background: transparent; border: none;")
+        footer_row.addWidget(hint_icon)
+        hint = QLabel("Fechar a janela minimiza para a bandeja do sistema.")
+        hint.setObjectName("Hint")
+        footer_row.addWidget(hint)
+        footer_row.addStretch()
+        layout.addLayout(footer_row)
 
+        layout.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        # Connects
         self.save_btn.clicked.connect(self.save_and_schedule)
         self.test_btn.clicked.connect(self.test_now)
 
-        self.next_dt = None
+        self.next_dt: Optional[datetime] = None
+        self.last_fire_key: Optional[str] = None
         self.refresh_next()
 
+        # Timer principal (1s)
         self.tick = QTimer(self)
         self.tick.timeout.connect(self.check_schedule)
         self.tick.start(1000)
 
+        # Timer para atualizar status (countdown)
+        self.status_tick = QTimer(self)
+        self.status_tick.timeout.connect(self._update_status_display)
+        self.status_tick.start(30000)  # 30s
+
         self.toast_widget = None
 
-        # --- System Tray ---
+        # ─── Tray ───
         if not QSystemTrayIcon.isSystemTrayAvailable():
-            QMessageBox.warning(self, "Aviso", "System Tray não disponível neste sistema.")
+            QMessageBox.warning(self, "Aviso", "System Tray não disponível.")
             self.tray = None
         else:
             self.tray = QSystemTrayIcon(self)
-            # Ícone padrão do sistema (não precisa arquivo .ico)
             icon = QApplication.style().standardIcon(QStyle.SP_ComputerIcon)
             self.tray.setIcon(icon)
-            self.tray.setToolTip("Cotação em BRL (rodando em segundo plano)")
+            self.tray.setToolTip("Cotações BRL — rodando em segundo plano")
 
             menu = QMenu()
-            act_show = QAction("Abrir", self)
-            act_test = QAction("Testar agora", self)
-            act_quit = QAction("Sair", self)
+            menu.setStyleSheet(QSS)  # Aplica estilo ao menu
+
+            act_show = QAction("📂  Abrir", self)
+            act_test = QAction("🔍  Testar agora", self)
+            act_quit = QAction("⏻  Sair", self)
 
             act_show.triggered.connect(self.show_main)
             act_test.triggered.connect(self.test_now)
@@ -652,23 +975,32 @@ class Main(QWidget):
             self.tray.activated.connect(self.on_tray_activated)
             self.tray.show()
 
-    # ---- Tray behavior ----
+    # ─── Callbacks ───
+    def _on_coin_toggled(self, code: str, checked: bool):
+        count = sum(1 for c in self.coin_cards.values() if c.isChecked())
+        self.coin_count.setText(f"{count} selecionada{'s' if count != 1 else ''}")
+
+    def _update_status_display(self):
+        if self.next_dt:
+            remaining = time_until(self.next_dt)
+            self.status.setText(
+                f"⏱ Próximo disparo: {self.next_dt.strftime('%d/%m %H:%M')}  •  em {remaining}"
+            )
+
     def closeEvent(self, event):
-        # Em vez de fechar, esconde e deixa no tray
         if self.tray:
             event.ignore()
             self.hide()
             self.tray.showMessage(
-                "Rodando em segundo plano",
-                "O app continua ativo na bandeja do sistema.\nClique com o botão direito no ícone para opções.",
+                "Cotações BRL",
+                "Rodando em segundo plano.\nClique com botão direito para opções.",
                 QSystemTrayIcon.Information,
-                4000
+                4000,
             )
         else:
             super().closeEvent(event)
 
     def on_tray_activated(self, reason):
-        # Clique esquerdo: abrir/mostrar
         if reason == QSystemTrayIcon.Trigger:
             self.show_main()
 
@@ -678,99 +1010,121 @@ class Main(QWidget):
         self.activateWindow()
 
     def exit_app(self):
-        # Fechar de verdade
         if self.tray:
             self.tray.hide()
         QApplication.quit()
 
-    # ---- App logic ----
-    def selected_coins(self):
-        return [c for c, cb in self.checks.items() if cb.isChecked()]
+    def selected_coins(self) -> List[str]:
+        return [code for code, card in self.coin_cards.items() if card.isChecked()]
 
     def refresh_next(self):
         cfg = load_config()
-        self.next_dt = next_trigger_datetime(cfg["time"])
-        self.status.setText(f"Próximo disparo: {self.next_dt.strftime('%d/%m %H:%M')}")
+        try:
+            hhmm = normalize_hhmm(cfg.time)
+        except Exception:
+            hhmm = "09:00"
+        self.next_dt = next_trigger_datetime(hhmm)
+        remaining = time_until(self.next_dt)
+        self.status.setText(
+            f"⏱ Próximo disparo: {self.next_dt.strftime('%d/%m %H:%M')}  •  em {remaining}"
+        )
+        self.last_fire_key = None
 
     def save_and_schedule(self):
-        hhmm = self.time_edit.text().strip()
         try:
-            datetime.strptime(hhmm, "%H:%M")
+            hhmm = normalize_hhmm(self.time_edit.text())
         except ValueError:
             QMessageBox.critical(self, "Erro", "Horário inválido. Use HH:MM (ex: 09:30).")
             return
-
         coins = self.selected_coins()
         if not coins:
             QMessageBox.critical(self, "Erro", "Selecione pelo menos uma moeda.")
             return
-
-        save_config({"time": hhmm, "coins": coins})
+        save_config(AppConfig(time=hhmm, coins=coins))
+        self.time_edit.setText(hhmm)
         self.refresh_next()
+
+        # Feedback visual no botão
+        self.save_btn.setText("✅  Salvo!")
+        self.save_btn.setEnabled(False)
+        QTimer.singleShot(2000, lambda: (
+            self.save_btn.setText("💾  Salvar e Agendar"),
+            self.save_btn.setEnabled(True)
+        ))
 
         if self.tray:
             self.tray.showMessage(
-                "Agendado",
+                "Agendamento salvo",
                 f"Horário: {hhmm}\nMoedas: {', '.join(coins)}",
                 QSystemTrayIcon.Information,
-                3000
+                3000,
             )
-        else:
-            QMessageBox.information(self, "OK", "Agendamento salvo.")
 
     def show_overlay(self, title: str, lines: list):
         if self.toast_widget is not None and self.toast_widget.isVisible():
             self.toast_widget.close()
-        self.toast_widget = ToastOverlay(title, [str(x) for x in lines], duration_ms=12000)
+        self.toast_widget = ToastOverlay(title, lines, duration_ms=15000)
         self.toast_widget.show()
 
     def test_now(self):
+        # Feedback visual
+        original_text = self.test_btn.text()
+        self.test_btn.setText("⏳  Buscando...")
+        self.test_btn.setEnabled(False)
+        QTimer.singleShot(3000, lambda: (
+            self.test_btn.setText(original_text),
+            self.test_btn.setEnabled(True)
+        ))
         threading.Thread(target=self.run_job, daemon=True).start()
 
     def run_job(self):
         cfg = load_config()
-        coins = cfg.get("coins", [])
-        now = datetime.now().strftime("%H:%M")
-
+        coins = cfg.coins
         if not coins:
             self.bridge.toast.emit("Configuração", ["Nenhuma moeda selecionada."])
             return
-
         try:
-            rows = fetch_quotes(coins)
-            lines = [f"{c}/BRL: {fmt_brl(v)}" for c, v in rows]
+            rows = self.client.fetch_quotes(coins)
+            # Montar linhas como tuplas (flag, code, value, pct)
+            coin_dict = {c[0]: c[2] for c in AVAILABLE_COINS}
+            lines = []
+            for code, bid, pct in rows:
+                flag = coin_dict.get(code, "💰")
+                lines.append((flag, code, fmt_brl(bid), f"{pct:+.2f}%"))
             if not lines:
-                lines = ["Sem dados retornados pela API."]
-            self.bridge.toast.emit(f"Cotações ({now})", lines)
+                self.bridge.toast.emit("Cotações", ["Sem dados retornados pela API."])
+                return
+            self.bridge.toast.emit("Cotações BRL", lines)
+        except requests.RequestException as e:
+            self.bridge.toast.emit("Erro de rede", [str(e)])
         except Exception as e:
-            self.bridge.toast.emit("Erro ao buscar cotações", [repr(e)])
+            self.bridge.toast.emit("Erro", [repr(e)])
 
     def check_schedule(self):
         if not self.next_dt:
             return
-
-        if datetime.now() >= self.next_dt:
-            threading.Thread(target=self.run_job, daemon=True).start()
+        now = datetime.now()
+        if now >= self.next_dt:
+            fire_key = self.next_dt.strftime("%Y-%m-%d %H:%M")
+            if self.last_fire_key != fire_key:
+                self.last_fire_key = fire_key
+                threading.Thread(target=self.run_job, daemon=True).start()
             self.refresh_next()
+
 def resource_path(relative: str) -> Path:
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / relative
-    # Aqui a base é src/
     return Path(__file__).resolve().parent / relative
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    # Em apps com tray, isso evita fechar quando todas janelas são escondidas.
     app.setQuitOnLastWindowClosed(False)
-    
+    app.setStyleSheet(QSS)
+
     icon_path = resource_path("icon.ico")
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
-    else:
-        print(f"[WARN] Ícone global não encontrado: {icon_path}")
 
     w = Main()
     w.show()
-
     sys.exit(app.exec())
