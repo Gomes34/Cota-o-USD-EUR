@@ -1,3 +1,4 @@
+
 # app.py
 # Windows (desktop) - Python + PySide6
 # App com interface para escolher horário/moedas e rodar em segundo plano no System Tray.
@@ -63,6 +64,189 @@ def fetch_quotes(coins):
     return rows
 
 
+import sys
+import json
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+import requests
+from PySide6.QtCore import (
+    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QObject, QStandardPaths
+)
+from PySide6.QtGui import (
+    QFont, QAction, QIcon, QCursor
+)
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QCheckBox, QLineEdit, QMessageBox, QFrame,
+    QSystemTrayIcon, QMenu, QStyle, QGridLayout, QGraphicsDropShadowEffect, QSizePolicy
+)
+
+AVAILABLE_COINS = ["USD", "EUR", "GBP", "ARS", "JPY", "CAD", "AUD", "BTC"]
+APP_NAME = "CotacaoBRLTray"
+
+# ------------------ Visual (QSS) ------------------
+QSS = """
+/* Base */
+QWidget {
+    background: #0f1115;
+    color: #e8eaf0;
+    font-family: "Segoe UI";
+    font-size: 11pt;
+}
+
+/* Labels */
+QLabel#Title {
+    font-size: 15pt;
+    font-weight: 700;
+    color: #f2f4f8;
+}
+QLabel#Subtitle {
+    color: rgba(232,234,240,170);
+    font-size: 10.5pt;
+}
+QLabel#Section {
+    font-size: 10.5pt;
+    font-weight: 600;
+    color: rgba(232,234,240,200);
+    margin-top: 8px;
+}
+QLabel#Status {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: rgba(232,234,240,210);
+}
+
+/* Card container */
+QFrame#Card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 16px;
+}
+
+/* Inputs */
+QLineEdit {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    padding: 10px 12px;
+    border-radius: 12px;
+    selection-background-color: rgba(125, 167, 255, 0.35);
+}
+QLineEdit:focus {
+    border: 1px solid rgba(125, 167, 255, 0.65);
+    background: rgba(255,255,255,0.07);
+}
+
+/* Checkboxes */
+QCheckBox {
+    spacing: 10px;
+    padding: 6px 8px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+}
+QCheckBox:hover {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10);
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.20);
+    background: rgba(0,0,0,0.25);
+}
+QCheckBox::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                stop:0 #7da7ff, stop:1 #6ee7ff);
+    border: 1px solid rgba(255,255,255,0.35);
+}
+
+/* Buttons */
+QPushButton {
+    padding: 10px 14px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.06);
+    color: #f2f4f8;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.18);
+}
+QPushButton:pressed {
+    background: rgba(255,255,255,0.08);
+}
+QPushButton#Primary {
+    border: 1px solid rgba(125,167,255,0.55);
+    background: rgba(125,167,255,0.18);
+}
+QPushButton#Primary:hover {
+    background: rgba(125,167,255,0.25);
+}
+QPushButton#Danger {
+    border: 1px solid rgba(255,120,120,0.50);
+    background: rgba(255,120,120,0.14);
+}
+QPushButton#Danger:hover {
+    background: rgba(255,120,120,0.20);
+}
+"""
+
+# ------------------ Config ------------------
+def config_path() -> Path:
+    base = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation))
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "config.json"
+
+@dataclass
+class AppConfig:
+    time: str = "09:00"
+    coins: List[str] = None
+
+    def __post_init__(self):
+        if self.coins is None:
+            self.coins = ["USD", "EUR"]
+
+def load_config() -> AppConfig:
+    p = config_path()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        time = data.get("time", "09:00")
+        coins = data.get("coins", ["USD", "EUR"])
+        if not isinstance(coins, list):
+            coins = ["USD", "EUR"]
+        coins = [c for c in coins if c in AVAILABLE_COINS]
+        if not coins:
+            coins = ["USD", "EUR"]
+        return AppConfig(time=time, coins=coins)
+    except Exception:
+        return AppConfig()
+
+def save_config(cfg: AppConfig) -> None:
+    p = config_path()
+    p.write_text(
+        json.dumps({"time": cfg.time, "coins": cfg.coins}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+# ------------------ Helpers ------------------
+def normalize_hhmm(text: str) -> str:
+    text = text.strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError("Formato inválido")
+    h = int(parts[0])
+    m = int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError("Hora/minuto fora do intervalo")
+    return f"{h:02d}:{m:02d}"
 def next_trigger_datetime(hhmm: str) -> datetime:
     now = datetime.now()
     hour, minute = map(int, hhmm.split(":"))
@@ -70,13 +254,10 @@ def next_trigger_datetime(hhmm: str) -> datetime:
     if target <= now:
         target += timedelta(days=1)
     return target
-
-
 def fmt_brl(v: float) -> str:
     s = f"{v:,.4f}"
     s = s.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
-
 
 class ToastOverlay(QWidget):
     def __init__(self, title: str, lines: list[str], duration_ms: int = 12000):
@@ -136,7 +317,205 @@ class ToastOverlay(QWidget):
             }
             QPushButton#closeBtn:hover { background: rgba(255,255,255,32); }
         """)
+# ------------------ API Client ------------------
+class QuotesClient:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": f"{APP_NAME}/1.0"})
 
+    def fetch_quotes(self, coins: List[str]) -> List[Tuple[str, float]]:
+        pairs = ",".join([f"{c}-BRL" for c in coins])
+        url = f"https://economia.awesomeapi.com.br/json/last/{pairs}"
+
+        r = self.session.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        rows = []
+        for c in coins:
+            key = f"{c}BRL"
+            q = data.get(key)
+            if not q:
+                continue
+            bid_raw = q.get("bid")
+            if bid_raw is None:
+                continue
+            rows.append((c, float(bid_raw)))
+        return rows
+
+# ------------------ Toast Overlay ------------------
+class ToastOverlay(QWidget):
+    def __init__(self, title: str, lines: list[str], duration_ms: int = 12000):
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        # ===== Container externo (para sombra respirar) =====
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)  # margem para a sombra aparecer
+        outer.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("ToastCard")
+        card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
+        card.setMinimumWidth(320)
+
+        # Sombra suave
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(34)
+        shadow.setOffset(0, 12)
+        shadow.setColor(Qt.black)
+        card.setGraphicsEffect(shadow)
+
+        outer.addWidget(card)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        # ===== Header =====
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("ToastTitle")
+        title_lbl.setFont(QFont("Segoe UI", 11, QFont.Bold))
+
+        # Botão X pequeno no topo (opcional, além do "Fechar")
+        x_btn = QPushButton("×")
+        x_btn.setObjectName("ToastX")
+        x_btn.setFixedSize(28, 28)
+        x_btn.clicked.connect(self.close)
+
+        header_row.addWidget(title_lbl, 1)
+        header_row.addWidget(x_btn, 0, Qt.AlignRight)
+        layout.addLayout(header_row)
+
+        # ===== Conteúdo =====
+        content = QFrame()
+        content.setObjectName("ToastContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
+        # Interpreta lines no formato "USD/BRL: R$ x" e alinha bonito
+        # Se não bater o padrão, mostra como texto simples.
+        parsed_any = False
+        for s in (lines or []):
+            if "/BRL:" in s:
+                parsed_any = True
+                left, right = s.split(":", 1)
+                pair = left.strip()           # ex "USD/BRL"
+                value = right.strip()         # ex "R$ 5,1707"
+
+                row = QHBoxLayout()
+                row.setSpacing(10)
+
+                # Badge do par
+                badge = QLabel(pair)
+                badge.setObjectName("ToastBadge")
+
+                val = QLabel(value)
+                val.setObjectName("ToastValue")
+                val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+                row.addWidget(badge, 0)
+                row.addWidget(val, 1)
+                content_layout.addLayout(row)
+            else:
+                # fallback (linha simples)
+                lbl = QLabel(s)
+                lbl.setObjectName("ToastLine")
+                lbl.setWordWrap(True)
+                content_layout.addWidget(lbl)
+
+        if not lines:
+            lbl = QLabel("Sem dados.")
+            lbl.setObjectName("ToastLine")
+            content_layout.addWidget(lbl)
+
+        layout.addWidget(content)
+
+        # ===== Rodapé =====
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+
+        close_btn = QPushButton("Fechar")
+        close_btn.setObjectName("ToastClose")
+        close_btn.setFixedHeight(34)
+        close_btn.clicked.connect(self.close)
+        footer.addWidget(close_btn)
+
+        layout.addLayout(footer)
+
+        # ===== Estilo do toast (só dele) =====
+        self.setStyleSheet("""
+            QFrame#ToastCard {
+                background: rgba(18, 20, 26, 245);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 18px;
+            }
+
+            QLabel#ToastTitle {
+                color: rgba(255,255,255,235);
+                letter-spacing: 0.2px;
+            }
+
+            QPushButton#ToastX {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 10px;
+                color: rgba(255,255,255,200);
+                font-size: 14pt;
+                padding-bottom: 2px;
+            }
+            QPushButton#ToastX:hover {
+                background: rgba(255,255,255,0.10);
+                border: 1px solid rgba(255,255,255,0.14);
+            }
+
+            QFrame#ToastContent {
+                background: rgba(255,255,255,0.03);
+                border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 14px;
+                padding: 10px;
+            }
+
+            QLabel#ToastBadge {
+                background: rgba(125,167,255,0.16);
+                border: 1px solid rgba(125,167,255,0.28);
+                color: rgba(230,240,255,235);
+                padding: 6px 10px;
+                border-radius: 999px;
+                font-weight: 700;
+                font-size: 10pt;
+            }
+
+            QLabel#ToastValue {
+                color: rgba(255,255,255,220);
+                font-weight: 600;
+                font-size: 10.5pt;
+            }
+
+            QLabel#ToastLine {
+                color: rgba(255,255,255,210);
+            }
+
+            QPushButton#ToastClose {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 12px;
+                padding: 6px 14px;
+                color: rgba(255,255,255,230);
+                font-weight: 600;
+            }
+            QPushButton#ToastClose:hover {
+                background: rgba(255,255,255,0.10);
+                border: 1px solid rgba(255,255,255,0.16);
+            }
+        """)
+
+        # ===== Animações =====
         QTimer.singleShot(duration_ms, self.fade_out)
 
         self.setWindowOpacity(0.0)
@@ -160,6 +539,15 @@ class ToastOverlay(QWidget):
         screen = QApplication.primaryScreen().availableGeometry()
         x = screen.x() + screen.width() - self.width() - 16
         y = screen.y() + 16
+        # posiciona no monitor do mouse (sem usar QGuiApplication.cursor())
+        pos = QCursor.pos()
+        screen = QApplication.screenAt(pos)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+
+        x = geo.x() + geo.width() - self.width() - 18
+        y = geo.y() + 18
         self.move(x, y)
 
         self.raise_()
@@ -169,17 +557,19 @@ class ToastOverlay(QWidget):
     def fade_out(self):
         if self.isVisible():
             self.anim_out.start()
-
+class Bridge(QObject):
+    toast = Signal(str, list)
 
 class Bridge(QObject):
     toast = Signal(str, list)
 
-
+# ------------------ Main Window ------------------
 class Main(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cotação em BRL - Agendador (Tray)")
         self.resize(520, 580)
+        self.resize(560, 620)
 
         self.bridge = Bridge()
         self.bridge.toast.connect(self.show_overlay)
@@ -331,7 +721,6 @@ class Main(QWidget):
     def show_overlay(self, title: str, lines: list):
         if self.toast_widget is not None and self.toast_widget.isVisible():
             self.toast_widget.close()
-
         self.toast_widget = ToastOverlay(title, [str(x) for x in lines], duration_ms=12000)
         self.toast_widget.show()
 
